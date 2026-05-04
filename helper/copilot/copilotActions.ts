@@ -5,15 +5,16 @@
  * All logic for image processing and response parsing is moved to copilotHelpers.ts.
  */
 
-import { getActiveSession } from './copilotSession';
-import { PROMPTS } from './copilotPrompts';
+import { getActiveSession } from './copilotSession.js';
+import { PROMPTS } from './copilotPrompts.js';
 import {
   parsePresence,
   saveTempImage,
   type CopilotResponse,
   type VisualAssertionResult,
   type ResponseLike
-} from './copilotHelpers';
+} from './copilotHelpers.js';
+import { extractError } from './errorExtractor.js';
 
 // ---------------------------------------------------------------------------
 // Core Actions
@@ -22,7 +23,7 @@ import {
 /**
  * Ask Copilot a question and return a structured response.
  */
-export async function askCopilot(
+export async function askAction(
   prompt: string,
   timeoutMs = 60_000
 ): Promise<CopilotResponse> {
@@ -40,7 +41,7 @@ export async function askCopilot(
 /**
  * Compare two images and ask Copilot whether they are semantically equivalent.
  */
-export async function compareImages(
+export async function compareImagesAction(
   imagePathA: string,
   imagePathB: string,
   timeoutMs = 60_000
@@ -69,7 +70,7 @@ export async function compareImages(
 /**
  * Perform a visual check on a base64-encoded screenshot to see if it contains a specific value.
  */
-export async function visualCheck(
+export async function visualCheckAction(
   screenshotBase64: string,
   expectedValue: string,
   timeoutMs = 60_000
@@ -107,35 +108,53 @@ export async function visualCheck(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Heal action
+// ---------------------------------------------------------------------------
+
 /**
- * Generate Playwright CLI commands to fix a failed step and complete the remaining actions.
- * @param error The error message from the failure.
- * @param failedStep The code snippet of the step that failed.
- * @param remainingActions The remaining code snippets in the method.
- * @param screenshotBase64 A base64-encoded screenshot of the page at the time of failure.
- * @param timeoutMs Timeout for the Copilot request.
+ * Single-parameter heal entry point.
+ *
+ * Pass the raw caught error (or just its message string) — this function
+ * calls {@link extractError} internally to resolve:
+ *   - `message`          – human-readable error message
+ *   - `failedStep`       – source of the method that contained the failure
+ *   - `remainingActions` – source lines from the failure point to end of method
+ *
+ * It then attaches a screenshot, builds the heal prompt, and asks Copilot to
+ * return an ordered JSON array of playwright-cli commands.
+ *
+ * @param errorMessage The raw error thrown by the failed Playwright action.
+ * @param screenshotBase64 Base64-encoded PNG screenshot taken at failure time.
+ * @param timeoutMs Copilot request timeout (default 90 s).
+ * @returns Ordered array of playwright-cli command strings ready for execution.
  */
-export async function generateFixCommands(
-  error: string,
-  failedStep: string,
-  remainingActions: string,
+export async function healerAction(
+  errorMessage: unknown,
   screenshotBase64: string,
   timeoutMs = 90_000
 ): Promise<string[]> {
+  // ── 1. Extract structured context from the error ─────────────────────────
+  const { message, context } = await extractError(errorMessage);
+  const failedStep       = context?.methodSource       ?? message;
+  const remainingActions = context?.remainderSource     ?? '';
+
+  // ── 2. Save screenshot to a temp file ────────────────────────────────────
   const session = await getActiveSession();
-  const temp = await saveTempImage(screenshotBase64);
+  const temp    = await saveTempImage(screenshotBase64);
 
   try {
-    // Append additional details to the base prompt
+    // ── 3. Build the heal prompt with extracted context ──────────────────
     const prompt = [
       PROMPTS.qaAssistantFailedStep,
       '',
-      'CONTEXT:',
-      `- Error Message: ${error}`,
-      `- Failed Step: ${failedStep}`,
-      `- Remaining Actions in Method: ${remainingActions}`
+      '━━━ CONTEXT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `Error Message      : ${message}`,
+      `Failed Step Source : ${failedStep}`,
+      `Remaining Actions  : ${remainingActions || '(none — this was the last action)'}`,
     ].join('\n');
 
+    // ── 4. Send to Copilot AI agent ──────────────────────────────────────
     const response = await session.sendAndWait(
       {
         prompt,
@@ -144,21 +163,18 @@ export async function generateFixCommands(
       timeoutMs
     ) as unknown;
 
+    // ── 5. Parse and return the command array ────────────────────────────
     const content = (response as ResponseLike | null)?.data?.content ?? '[]';
-    
+
     try {
-      // Attempt to parse the response as a JSON array of strings
       const commands = JSON.parse(content.trim().replace(/^```json\n?|\n?```$/g, ''));
-      if (Array.isArray(commands)) {
-        return commands;
-      }
-    } catch (e) {
-      console.error('Failed to parse fix commands from Copilot response:', content);
+      if (Array.isArray(commands)) return commands;
+    } catch {
+      console.error('[healerAction] Failed to parse heal commands from response:', content);
     }
-    
+
     return [];
   } finally {
     await temp.cleanup();
   }
 }
-

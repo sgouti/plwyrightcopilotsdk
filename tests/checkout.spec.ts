@@ -1,5 +1,5 @@
 import { expect, test } from '../fixtures/index';
-import { visualCheck } from '../helper/copilot/copilotActions';
+import { visualCheckAction } from '../helper/copilot/copilotActions';
 
 test('complete checkout for one item', async ({ page, loginPage, inventoryPage, cartPage, checkoutPage }) => {
   await loginPage.loginAsStandardUser();
@@ -17,6 +17,6 @@ test('complete checkout for one item', async ({ page, loginPage, inventoryPage, 
   // actual screenshot, not just present in the DOM.
   const screenshotBuffer = await page.screenshot();
   const screenshotBase64 = screenshotBuffer.toString('base64');
-  const aiCheck = await visualCheck(screenshotBase64, 'Thank you for your order!');
+  const aiCheck = await visualCheckAction(screenshotBase64, 'Thank you for your order!');
   expect(aiCheck.present, `Copilot visual check failed: ${aiCheck.reasoning}`).toBe(true);
 });
