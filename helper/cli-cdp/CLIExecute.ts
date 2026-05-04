@@ -1,83 +1,41 @@
 import { execSync } from 'node:child_process';
-import { validateCommand } from './validator.js';
-import { getPort } from './portManager.js';
-import { writeLog } from './logger.js';
+import { validateCommand } from './validator';
+import { getPort } from './portManager';
+import { writeLog } from './logger';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const ERROR_PATTERNS = ['does not match any elements', 'error:', 'failed to', 'timed out', 'unexpected value'];
 
-function sessionName(): string {
-  const idx = parseInt(process.env.TEST_WORKER_INDEX ?? '0', 10);
-  return `test-worker-${idx}`;
-}
-
-/** Run a shell command; never throws — returns combined stdout+stderr. */
-function run(command: string): string {
+function run(cmd: string): string {
   try {
-    return execSync(command, { encoding: 'utf-8', stdio: 'pipe', timeout: 30_000 });
+    return execSync(cmd, { encoding: 'utf-8', stdio: 'pipe', timeout: 30_000 });
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string };
     return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
   }
 }
 
-/** Returns true if playwright-cli output contains a soft error message. */
-function hasError(output: string): boolean {
-  const lower = output.toLowerCase();
-  return (
-    lower.includes('does not match any elements') ||
-    lower.includes('error:')                       ||
-    lower.includes('failed to')                    ||
-    lower.includes('timed out')                    ||
-    lower.includes('unexpected value')
-  );
-}
+export class CLISession {
+  private readonly port: number;
+  private readonly session: string;
 
-function captureSnapshot(session: string): string {
-  const out = run(`playwright-cli -s=${session} snapshot`);
-  return out.trim() || '[snapshot unavailable]';
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Executes a playwright-cli command against the browser the fixture launched.
- * Re-attaches on every call so the CLI always targets the currently open page.
- *
- * @example
- *   await CLIExecute("click '#add-to-cart-sauce-labs-backpack'");
- *   await CLIExecute("fill '#user-name' 'standard_user'");
- *
- * @throws {Error} Command + output + DOM snapshot on failure.
- */
-export async function CLIExecute(cmd: string): Promise<void> {
-  validateCommand(cmd);
-
-  const port    = getPort();
-  const session = sessionName();
-
-  // Re-attach on every call so the CLI sees the page currently open in Playwright.
-  run(`playwright-cli attach --cdp http://localhost:${port} --session ${session}`);
-
-  const command = `playwright-cli -s=${session} ${cmd.trim().replace(/'/g, '"')}`;
-  const output  = run(command);
-
-  if (!hasError(output)) {
-    writeLog({ timestamp: new Date().toISOString(), cmd, port, status: 'success' });
-    return;
+  constructor(workerIndex: number) {
+    this.port    = getPort(workerIndex);
+    this.session = `test-worker-${workerIndex}`;
+    run(`playwright-cli attach --cdp http://localhost:${this.port} --session ${this.session}`);
   }
 
-  const snap  = captureSnapshot(session);
-  const error = [
-    'CLIExecute FAILED',
-    `Command : ${command}`,
-    `Output  : ${output.trim()}`,
-    `Snapshot: ${snap}`,
-  ].join('\n\n');
+  async execute(cmd: string): Promise<void> {
+    validateCommand(cmd);
+    const command = `playwright-cli -s=${this.session} ${cmd.trim().replace(/'/g, '"')}`;
+    const output  = run(command);
+    const failed  = ERROR_PATTERNS.some(p => output.toLowerCase().includes(p));
+    const status  = failed ? 'failed' : 'success';
 
-  writeLog({ timestamp: new Date().toISOString(), cmd, port, status: 'failed', error });
-  throw new Error(error);
+    writeLog({ timestamp: new Date().toISOString(), cmd, port: this.port, status });
+
+    if (failed) {
+      const snap = run(`playwright-cli -s=${this.session} snapshot`).trim() || '[snapshot unavailable]';
+      throw new Error(['CLISession.execute FAILED', `Command: ${command}`, `Output: ${output.trim()}`, `Snapshot: ${snap}`].join('\n\n'));
+    }
+  }
 }

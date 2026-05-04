@@ -1,36 +1,26 @@
 /**
  * copilotActions.ts
  *
- * QA-friendly helpers for sending prompts and collecting Copilot responses.
- * All functions reuse the single shared session managed by copilotSession.ts.
+ * QA-friendly actionable functions for Copilot interactions.
+ * All logic for image processing and response parsing is moved to copilotHelpers.ts.
  */
 
-import type { SessionEvent } from '@github/copilot-sdk';
-import { getActiveSession } from './copilotSession.js';
+import { getActiveSession } from './copilotSession';
+import { PROMPTS } from './copilotPrompts';
+import {
+  parsePresence,
+  saveTempImage,
+  type CopilotResponse,
+  type VisualAssertionResult,
+  type ResponseLike
+} from './copilotHelpers';
 
 // ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface CopilotResponse {
-  sessionId: string;
-  answer: string;
-  events: SessionEvent[];
-}
-
-type ResponseLike = { data?: { content?: string } };
-
-// ---------------------------------------------------------------------------
-// Core
+// Core Actions
 // ---------------------------------------------------------------------------
 
 /**
  * Ask Copilot a question and return a structured response.
- * The simplest entry point for a text-only interaction.
- *
- * @example
- * const result = await askCopilot('Is the login page accessible?');
- * console.log(result.answer);
  */
 export async function askCopilot(
   prompt: string,
@@ -48,12 +38,7 @@ export async function askCopilot(
 }
 
 /**
- * Compare two images (as file paths) and ask Copilot whether they are
- * semantically equivalent. Returns the full structured response.
- *
- * @example
- * const result = await compareImages('/tmp/before.png', '/tmp/after.png');
- * console.log(result.answer);
+ * Compare two images and ask Copilot whether they are semantically equivalent.
  */
 export async function compareImages(
   imagePathA: string,
@@ -63,7 +48,7 @@ export async function compareImages(
   const session = await getActiveSession();
   const response = await session.sendAndWait(
     {
-      prompt: 'Are these two images semantically equivalent? Briefly state Yes or No, then explain the key differences or similarities.',
+      prompt: PROMPTS.compareImages,
       attachments: [
         { type: 'file', path: imagePathA, displayName: 'Image A' },
         { type: 'file', path: imagePathB, displayName: 'Image B' }
@@ -80,3 +65,100 @@ export async function compareImages(
     events
   };
 }
+
+/**
+ * Perform a visual check on a base64-encoded screenshot to see if it contains a specific value.
+ */
+export async function visualCheck(
+  screenshotBase64: string,
+  expectedValue: string,
+  timeoutMs = 60_000
+): Promise<VisualAssertionResult> {
+  const session = await getActiveSession();
+  const temp = await saveTempImage(screenshotBase64);
+
+  try {
+    const prompt = [
+      PROMPTS.visualCheck,
+      '',
+      `VALUE TO CHECK: "${expectedValue}"`
+    ].join('\n');
+
+    const response = await session.sendAndWait(
+      {
+        prompt,
+        attachments: [{ type: 'file', path: temp.path, displayName: 'Screenshot' }]
+      },
+      timeoutMs
+    ) as unknown;
+
+    const reasoning = (response as ResponseLike | null)?.data?.content ?? '';
+    const events = await session.getMessages();
+
+    return {
+      sessionId: session.sessionId,
+      checkedValue: expectedValue,
+      present: parsePresence(reasoning),
+      reasoning,
+      events
+    };
+  } finally {
+    await temp.cleanup();
+  }
+}
+
+/**
+ * Generate Playwright CLI commands to fix a failed step and complete the remaining actions.
+ * @param error The error message from the failure.
+ * @param failedStep The code snippet of the step that failed.
+ * @param remainingActions The remaining code snippets in the method.
+ * @param screenshotBase64 A base64-encoded screenshot of the page at the time of failure.
+ * @param timeoutMs Timeout for the Copilot request.
+ */
+export async function generateFixCommands(
+  error: string,
+  failedStep: string,
+  remainingActions: string,
+  screenshotBase64: string,
+  timeoutMs = 90_000
+): Promise<string[]> {
+  const session = await getActiveSession();
+  const temp = await saveTempImage(screenshotBase64);
+
+  try {
+    // Append additional details to the base prompt
+    const prompt = [
+      PROMPTS.qaAssistantFailedStep,
+      '',
+      'CONTEXT:',
+      `- Error Message: ${error}`,
+      `- Failed Step: ${failedStep}`,
+      `- Remaining Actions in Method: ${remainingActions}`
+    ].join('\n');
+
+    const response = await session.sendAndWait(
+      {
+        prompt,
+        attachments: [{ type: 'file', path: temp.path, displayName: 'Page Snapshot' }]
+      },
+      timeoutMs
+    ) as unknown;
+
+    const content = (response as ResponseLike | null)?.data?.content ?? '[]';
+    
+    try {
+      // Attempt to parse the response as a JSON array of strings
+      const commands = JSON.parse(content.trim().replace(/^```json\n?|\n?```$/g, ''));
+      if (Array.isArray(commands)) {
+        return commands;
+      }
+    } catch (e) {
+      console.error('Failed to parse fix commands from Copilot response:', content);
+    }
+    
+    return [];
+  } finally {
+    await temp.cleanup();
+  }
+}
+

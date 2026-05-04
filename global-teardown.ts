@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process';
-import { endSession } from './helper/copilot/copilotSession.js';
-import { clearRegistry } from './helper/cli-cdp/portManager.js';
+import { endSession } from './helper/copilot/copilotSession';
+import { clearRegistry } from './helper/cli-cdp/portManager';
 
 export default async function globalTeardown(): Promise<void> {
   await endSession();

@@ -31,15 +31,9 @@ export function registerPort(workerIndex: number, port: number): void {
  * Retrieve the debug port registered for the current worker.
  * Throws immediately if the fixture has not registered a port yet.
  */
-export function getPort(): number {
-  const workerIndex = parseInt(process.env.TEST_WORKER_INDEX ?? '0', 10);
-  const port        = read()[String(workerIndex)];
-  if (port === undefined) {
-    throw new Error(
-      `No CDP port registered for worker ${workerIndex}. ` +
-      `Ensure the browser fixture ran before calling CLIExecute.`
-    );
-  }
+export function getPort(workerIndex: number): number {
+  const port = read()[String(workerIndex)];
+  if (port === undefined) throw new Error(`No CDP port registered for worker ${workerIndex}. Ensure the browser fixture ran before calling CLISession.`);
   return port;
 }
 

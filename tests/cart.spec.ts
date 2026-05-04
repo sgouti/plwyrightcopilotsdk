@@ -1,4 +1,4 @@
-import { expect, test } from '../fixtures/index.js';
+import { expect, test } from '../fixtures/index';
 
 test('add backpack to cart', async ({ loginPage, inventoryPage, cartPage }) => {
   await loginPage.loginAsStandardUser();
